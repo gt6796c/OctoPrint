@@ -154,6 +154,7 @@ default_settings = {
 	"devel": {
 		"stylesheet": "css",
 		"virtualPrinter": {
+			"verbosePosition": False,
 			"enabled": False,
 			"okAfterResend": False,
 			"forceChecksum": False,
@@ -174,7 +175,8 @@ default_settings = {
 			"waitOnLongMoves": False,
 			"rxBuffer": 64,
 			"txBuffer": 40,
-			"commandBuffer": 4
+			"commandBuffer": 4,
+			"commandMap": {}
 		}
 	}
 }

@@ -26,6 +26,11 @@ function PrinterProfilesViewModel() {
                     [0,0]
                 ],
                 nozzleDiameter: 0.4
+            },
+            tool: {
+                count: 0,
+                slots: [
+                ]
             }
         }
     };
@@ -69,6 +74,9 @@ function PrinterProfilesViewModel() {
     self.editorExtruders = ko.observable();
     self.editorExtruderOffsets = ko.observableArray();
 
+    self.editorTools = ko.observable();
+    self.editorToolSlots = ko.observableArray();
+
     self.editorAxisXSpeed = ko.observable();
     self.editorAxisYSpeed = ko.observable();
     self.editorAxisZSpeed = ko.observable();
@@ -88,6 +96,26 @@ function PrinterProfilesViewModel() {
         {key: "blue", name: gettext("blue")},
         {key: "black", name: gettext("black")}
     ]);
+
+    self.koEditorToolSlots = ko.computed(function() {
+        var toolSlots = self.editorToolSlots();
+        var numTools = self.editorTools();
+        if (!numTools) {
+            numTools = 0;
+        }
+
+        if (numTools > toolSlots.length) {
+            for (var i = toolSlots.length; i < numTools; i++) {
+                toolSlots[i] = {
+                    name: ko.observable("Tool " + i),
+                    diameter: ko.observable(0)
+                }
+            }
+            self.editorToolSlots(toolSlots);
+        }
+
+        return toolSlots.slice(0, numTools);
+    });
 
     self.koEditorExtruderOffsets = ko.computed(function() {
         var extruderOffsets = self.editorExtruderOffsets();
@@ -221,12 +249,26 @@ function PrinterProfilesViewModel() {
         self.editorExtruders(data.extruder.count);
         var offsets = [];
         _.each(data.extruder.offsets, function(offset) {
-            offsets.push({
-                x: ko.observable(offset[0]),
-                y: ko.observable(offset[1])
-            });
+            if (offset) {
+                offsets.push({
+                    x: ko.observable(offset[0]),
+                    y: ko.observable(offset[1])
+                });
+            }
         });
         self.editorExtruderOffsets(offsets);
+
+        self.editorTools(data.tool.count);
+        var slots = [];
+        _.each(data.tool.slots, function(slot) {
+            if (slot) {
+                slots.push( {
+                    name: ko.observable(slot.name),
+                    diameter: ko.observable(slot.diameter)
+                });
+            }
+        });
+        self.editorToolSlots(slots);
 
         self.editorAxisXSpeed(data.axes.x.speed);
         self.editorAxisXInverted(data.axes.x.inverted);
@@ -277,9 +319,13 @@ function PrinterProfilesViewModel() {
             extruder: {
                 count: parseInt(self.editorExtruders()),
                 offsets: [
-                    [0.0, 0.0]
                 ],
                 nozzleDiameter: parseFloat(self.editorNozzleDiameter())
+            },
+            tool: {
+                count: parseInt(self.editorTools()),
+                slots: [
+                ]
             },
             axes: {
                 x: {
@@ -297,13 +343,23 @@ function PrinterProfilesViewModel() {
             }
         };
 
-        if (self.editorExtruders() > 1) {
-            for (var i = 1; i < self.editorExtruders(); i++) {
+        if (self.editorExtruders() > 0) {
+            for (var i = 0; i < self.editorExtruders(); i++) {
                 var offset = [0.0, 0.0];
                 if (i < self.editorExtruderOffsets().length) {
                     offset = [parseFloat(self.editorExtruderOffsets()[i]["x"]()), parseFloat(self.editorExtruderOffsets()[i]["y"]())];
                 }
                 profile.extruder.offsets.push(offset);
+            }
+        }
+
+        if (self.editorTools() > 0) {
+            for (var i=0; i < self.editorTools(); i++) {
+                var slot = {name:"Tool "+i, diameter:0.0};
+                if (i < self.editorToolSlots().length) {
+                    slot = {name: self.editorToolSlots()[i]["name"](), diameter: parseFloat(self.editorToolSlots()[i]["diameter"]())};
+                }
+                profile.tool.slots.push(slot);
             }
         }
 

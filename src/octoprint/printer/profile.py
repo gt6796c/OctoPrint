@@ -57,6 +57,11 @@ class PrinterProfileManager(object):
 			y = dict(speed=6000, inverted=False),
 			z = dict(speed=200, inverted=False),
 			e = dict(speed=300, inverted=False)
+		),
+		tool=dict(
+			count=0,
+			slots = [
+			]
 		)
 	)
 
@@ -267,7 +272,7 @@ class PrinterProfileManager(object):
 			value[path[-1]] = converter(value[path[-1]])
 
 		# convert ints
-		for path in (("extruder", "count"), ("axes", "x", "speed"), ("axes", "y", "speed"), ("axes", "z", "speed")):
+		for path in (("extruder", "count"), ("axes", "x", "speed"), ("axes", "y", "speed"), ("axes", "z", "speed"), ("tool", "count")):
 			try:
 				convert_value(profile, path, int)
 			except:
@@ -293,15 +298,29 @@ class PrinterProfileManager(object):
 
 		# validate offsets
 		offsets = []
-		for offset in profile["extruder"]["offsets"]:
-			if not len(offset) == 2:
-				return False
-			x_offset, y_offset = offset
-			try:
-				offsets.append((float(x_offset), float(y_offset)))
-			except:
-				return False
-		profile["extruder"]["offsets"] = offsets
+		if profile["extruder"]["count"] > 0:
+			for offset in profile["extruder"]["offsets"]:
+				if not len(offset) == 2:
+					return False
+				x_offset, y_offset = offset
+				try:
+					offsets.append((float(x_offset), float(y_offset)))
+				except:
+					return False
+			profile["extruder"]["offsets"] = offsets
+
+		# validate tools
+		tools = []
+		if profile["tool"]["count"] > 0:
+			for slot in profile["tool"]["slots"]:
+				name = slot ["name"]
+				diameter = slot["diameter"]
+				try:
+					tools.append(dict(name=name, diameter=(float(diameter))))
+				except:
+					return False
+			profile["tool"]["slots"] = tools
+
 
 		return profile
 

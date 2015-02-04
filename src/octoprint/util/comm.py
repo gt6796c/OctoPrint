@@ -120,6 +120,7 @@ class MachineCom(object):
 	def __init__(self, port = None, baudrate = None, callbackObject = None):
 		self._logger = logging.getLogger(__name__)
 		self._serialLogger = logging.getLogger("SERIAL")
+		self._isGrbl = None
 
 		if port == None:
 			port = settings().get(["serial", "port"])
@@ -206,6 +207,17 @@ class MachineCom(object):
 
 	def __del__(self):
 		self.close()
+
+# I wonder if this can be done with _gcode_ hooks?
+	def _sendIdleCommand(self,needUpdate=False):
+		if self._isGrbl is None:
+			self._sendCommand("M105")
+			self._sendCommand("$")
+		elif self._isGrbl:
+			if needUpdate:
+				self._sendCommand("?")
+		else:
+			self._sendCommand("M105")
 
 	##~~ internal state management
 
@@ -657,6 +669,8 @@ class MachineCom(object):
 		heatingUp = False
 		swallowOk = False
 		supportRepetierTargetTemp = settings().getBoolean(["feature", "repetierTargetTemp"])
+		grblMoving = True
+		grblLastStatus = ""
 
 		while True:
 			try:
@@ -814,8 +828,26 @@ class MachineCom(object):
 						and line.strip() != 'ok' and not line.startswith("wait") \
 						and not line.startswith('Resend:') \
 						and line != 'echo:Unknown command:""\n' \
+						and not line.find('error:') \
 						and self.isOperational():
 					self._callback.mcMessage(line)
+
+				if self._isGrbl and 'MPos' in line:
+					if grblLastStatus == line:
+						grblMoving = False
+					else:
+						grblMoving = True
+					grblLastStatus = line
+
+					parts = line.strip("\r\n").split(":")
+
+					pos = parts[1].split(",")
+					MPos = (float(pos[0]), float(pos[1]), float(pos[2]))
+
+					pos = parts[2].split(",")
+					WPos = (float(pos[0]), float(pos[1]), float( pos[2].strip(">") ))
+
+
 
 				##~~ Parsing for feedback commands
 				if feedbackControls:
@@ -864,7 +896,7 @@ class MachineCom(object):
 							self._baudrateDetectRetry -= 1
 							self._serial.write('\n')
 							self._log("Baudrate test retry: %d" % (self._baudrateDetectRetry))
-							self._sendCommand("M105")
+							self._sendIdleCommand()
 							self._testingBaudrate = True
 						else:
 							baudrate = self._baudrateDetectList.pop(0)
@@ -876,15 +908,18 @@ class MachineCom(object):
 								self._baudrateDetectTestOk = 0
 								self._timeout = getNewTimeout("communication")
 								self._serial.write('\n')
-								self._sendCommand("M105")
+								self._sendIdleCommand()
 								self._testingBaudrate = True
 							except:
 								self._log("Unexpected error while setting baudrate: %d %s" % (baudrate, getExceptionString()))
+					elif '$$' in line:
+						self._isGrbl = True
+						self._changeState(self.STATE_OPERATIONAL)
 					elif 'ok' in line and 'T:' in line:
 						self._baudrateDetectTestOk += 1
 						if self._baudrateDetectTestOk < 10:
 							self._log("Baudrate test ok: %d" % (self._baudrateDetectTestOk))
-							self._sendCommand("M105")
+							self._sendIdleCommand()
 						else:
 							self._sendCommand("M999")
 							self._serial.timeout = settings().getFloat(["serial", "timeout", "connection"])
@@ -893,25 +928,30 @@ class MachineCom(object):
 								self.refreshSdFiles()
 							else:
 								self.initSdCard()
+							self._isGrbl = False
 							eventManager().fire(Events.CONNECTED, {"port": self._port, "baudrate": self._baudrate})
 					else:
 						self._testingBaudrate = False
 
 				### Connection attempt
 				elif self._state == self.STATE_CONNECTING:
-					if (line == "" or "wait" in line) and startSeen:
-						self._sendCommand("M105")
-					elif "start" in line:
-						startSeen = True
-					elif "ok" in line and startSeen:
+					if self._isGrbl:
 						self._changeState(self.STATE_OPERATIONAL)
-						if self._sdAvailable:
-							self.refreshSdFiles()
-						else:
-							self.initSdCard()
 						eventManager().fire(Events.CONNECTED, {"port": self._port, "baudrate": self._baudrate})
-					elif time.time() > self._timeout:
-						self.close()
+					else:
+						if (line == "" or "wait" in line) and startSeen:
+							self._sendIdleCommand()
+						elif "start" in line:
+							startSeen = True
+						elif "ok" in line and startSeen:
+							self._changeState(self.STATE_OPERATIONAL)
+							if self._sdAvailable:
+								self.refreshSdFiles()
+							else:
+								self.initSdCard()
+							eventManager().fire(Events.CONNECTED, {"port": self._port, "baudrate": self._baudrate})
+						elif time.time() > self._timeout:
+							self.close()
 
 				### Operational
 				elif self._state == self.STATE_OPERATIONAL or self._state == self.STATE_PAUSED:
@@ -922,7 +962,7 @@ class MachineCom(object):
 						elif not self._commandQueue.empty():
 							self._sendCommand(self._commandQueue.get())
 						else:
-							self._sendCommand("M105")
+							self._sendIdleCommand(grblMoving)
 						tempRequestTimeout = getNewTimeout("temperature")
 					# resend -> start resend procedure from requested line
 					elif line.lower().startswith("resend") or line.lower().startswith("rs"):
@@ -932,13 +972,16 @@ class MachineCom(object):
 
 				### Printing
 				elif self._state == self.STATE_PRINTING:
+					if self._isGrbl and line.startswith('error:'):
+						self._log("Unknown command for grbl: " + line)
+						line = 'ok'
 					if line == "" and time.time() > self._timeout:
 						self._log("Communication timeout during printing, forcing a line")
 						line = 'ok'
 
 					if self.isSdPrinting():
 						if time.time() > tempRequestTimeout and not heatingUp:
-							self._sendCommand("M105")
+							self._sendIdleCommand()
 							tempRequestTimeout = getNewTimeout("temperature")
 
 						if time.time() > sdStatusRequestTimeout and not heatingUp:
@@ -947,7 +990,8 @@ class MachineCom(object):
 					else:
 						# Even when printing request the temperature every 5 seconds.
 						if time.time() > tempRequestTimeout and not self.isStreaming():
-							self._commandQueue.put("M105")
+							if not self._isGrbl:
+								self._commandQueue.put("M105")
 							tempRequestTimeout = getNewTimeout("temperature")
 
 						if "ok" in line and swallowOk:
@@ -1086,6 +1130,7 @@ class MachineCom(object):
 					eventManager().fire(Events.PRINT_DONE, payload)
 				return
 
+# TODO: need to trim floats if needed if so
 			self._sendCommand(line, True)
 			self._callback.mcProgress()
 
@@ -1151,7 +1196,7 @@ class MachineCom(object):
 				self._doSend(cmd, sendChecksum)
 
 	def _doSend(self, cmd, sendChecksum=False):
-		if sendChecksum or self._alwaysSendChecksum:
+		if sendChecksum or self._alwaysSendChecksum and not self._isGrbl:
 			lineNumber = self._currentLine
 			self._addToLastLines(cmd)
 			self._currentLine += 1
@@ -1206,7 +1251,8 @@ class MachineCom(object):
 
 	def _gcode_M0(self, cmd):
 		self.setPause(True)
-		return "M105" # Don't send the M0 or M1 to the machine, as M0 and M1 are handled as an LCD menu pause.
+		if not self._isGrbl:
+			return "M105" # Don't send the M0 or M1 to the machine, as M0 and M1 are handled as an LCD menu pause.
 	_gcode_M1 = _gcode_M0
 
 	def _gcode_M104(self, cmd):
