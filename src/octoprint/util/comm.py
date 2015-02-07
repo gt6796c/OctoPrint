@@ -162,6 +162,7 @@ class MachineCom(object):
 		self._pluginManager = octoprint.plugin.plugin_manager()
 		self._gcode_hooks = self._pluginManager.get_hooks("octoprint.comm.protocol.gcode")
 		self._printer_action_hooks = self._pluginManager.get_hooks("octoprint.comm.protocol.action")
+		self._input_hooks = self._pluginManager.get_hooks("octoprint.comm.protocol.input")
 
 		# SD status data
 		self._sdAvailable = False
@@ -852,6 +853,13 @@ class MachineCom(object):
 				if "ok" in line and heatingUp:
 					heatingUp = False
 
+				for hook in self._input_hooks:
+					hook_line = self._input_hooks[hook](self, line)
+					if hook_line is None:
+						continue
+					else:
+						line = hook_line
+						
 				### Baudrate detection
 				if self._state == self.STATE_DETECT_BAUDRATE:
 					if line == '' or time.time() > self._timeout:
