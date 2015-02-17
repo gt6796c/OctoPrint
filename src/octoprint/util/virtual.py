@@ -23,9 +23,15 @@ class VirtualPrinter():
 		self.incoming = CharCountingQueue(settings().getInt(["devel", "virtualPrinter", "rxBuffer"]), name="RxBuffer")
 		self.outgoing = Queue.Queue()
 		self.buffered = Queue.Queue(maxsize=settings().getInt(["devel", "virtualPrinter", "commandBuffer"]))
+		self._flavor = settings().get(["devel","virtualPrinter","flavor"])
+		self._verbosePosition = settings().getBoolean(["devel","virtualPrinter","verbosePosition"])
+		self._commandMap = settings().get(["devel","virtualPrinter","commandMap"],asdict=True)
 
-		for item in ['start\n', 'Marlin: Virtual Marlin!\n', '\x80\n', 'SD card ok\n']: # no sd card as default startup scenario
-			self.outgoing.put(item)
+		if self._flavor is None:
+			for item in ['start\n', 'Marlin: Virtual Marlin!\n', '\x80\n', 'SD card ok\n']: # no sd card as default startup scenario
+				self.outgoing.put(item)
+		else:
+			self.outgoing.put(self._flavor)
 
 		self.currentExtruder = 0
 		self.temp = [0.0] * settings().getInt(["devel", "virtualPrinter", "numExtruders"])
@@ -53,6 +59,7 @@ class VirtualPrinter():
 		self._writingToSd = False
 		self._newSdFilePos = None
 		self._heatupThread = None
+
 
 		self.currentLine = 0
 		self.lastN = 0
@@ -82,6 +89,7 @@ class VirtualPrinter():
 	def _processIncoming(self):
 		while self.incoming is not None:
 			self._simulateTemps()
+
 
 			try:
 				data = self.incoming.get(timeout=0.01)
@@ -130,6 +138,10 @@ class VirtualPrinter():
 				else:
 					self.lastN = linenumber
 				data = data.split(None, 1)[1].strip()
+
+			if data in self._commandMap:
+				self.outgoing.put(self._commandMap[data])
+				continue
 
 			data += "\n"
 
@@ -295,8 +307,12 @@ class VirtualPrinter():
 	def _processTemperatureQuery(self):
 		includeTarget = not settings().getBoolean(["devel", "virtualPrinter", "repetierStyleTargetTemperature"])
 
+		numExtruders = settings().getInt(["devel", "virtualPrinter", "numExtruders"])
+
+		if numExtruders == 0:
+			return
 		# send simulated temperature data
-		if settings().getInt(["devel", "virtualPrinter", "numExtruders"]) > 1:
+		elif  numExtruders > 1:
 			allTemps = []
 			for i in range(len(self.temp)):
 				allTemps.append((i, self.temp[i], self.targetTemp[i]))
@@ -413,10 +429,16 @@ class VirtualPrinter():
 				slept = 0
 				while duration - slept > self._read_timeout:
 					time.sleep(self._read_timeout)
-					self.outgoing.put("wait")
+					if self._verbosePosition:
+						self.outgoing.put("<Run,MPos:%f,3.20,5.20,WPos:10.00,3.2,5.2>" % duration)
+					else:
+						self.outgoing.put("wait")
 					slept += self._read_timeout
 			else:
 				time.sleep(duration)
+
+		if self._verbosePosition:
+			self.outgoing.put("<Run,MPos:%f,3.20,5.20,WPos:10.00,3.2,5.2>" % duration)
 
 	def _setPosition(self, line):
 		matchX = re.search("X([0-9.]+)", line)
@@ -512,24 +534,23 @@ class VirtualPrinter():
 		if os.path.exists(f) and os.path.isfile(f):
 			os.remove(f)
 
+	def _simulateChange(self, delta, timeDiff, current, target):
+		if abs(current-target) > delta:
+			oldVal = current
+			current += math.copysign(timeDiff * 10, target - current)
+			if math.copysign(1, target - oldVal) != math.copysign(1, target - current):
+				current = target
+			if current < 0:
+				current = 0
+		return current
+
+
 	def _simulateTemps(self, delta=1):
 		timeDiff = self.lastTempAt - time.time()
 		self.lastTempAt = time.time()
 		for i in range(len(self.temp)):
-			if abs(self.temp[i] - self.targetTemp[i]) > delta:
-				oldVal = self.temp[i]
-				self.temp[i] += math.copysign(timeDiff * 10, self.targetTemp[i] - self.temp[i])
-				if math.copysign(1, self.targetTemp[i] - oldVal) != math.copysign(1, self.targetTemp[i] - self.temp[i]):
-					self.temp[i] = self.targetTemp[i]
-				if self.temp[i] < 0:
-					self.temp[i] = 0
-		if abs(self.bedTemp - self.bedTargetTemp) > delta:
-			oldVal = self.bedTemp
-			self.bedTemp += math.copysign(timeDiff * 10, self.bedTargetTemp - self.bedTemp)
-			if math.copysign(1, self.bedTargetTemp - oldVal) != math.copysign(1, self.bedTargetTemp - self.bedTemp):
-				self.bedTemp = self.bedTargetTemp
-			if self.bedTemp < 0:
-				self.bedTemp = 0
+			self.temp[i] = self._simulateChange(delta,timeDiff,self.temp[i], self.targetTemp[i])
+		self.bedTemp = self._simulateChange( delta, timeDiff, self.bedTemp, self.bedTargetTemp)
 
 	def _processBuffer(self):
 		while self.buffered is not None:

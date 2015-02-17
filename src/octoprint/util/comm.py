@@ -162,6 +162,8 @@ class MachineCom(object):
 		self._pluginManager = octoprint.plugin.plugin_manager()
 		self._gcode_hooks = self._pluginManager.get_hooks("octoprint.comm.protocol.gcode")
 		self._printer_action_hooks = self._pluginManager.get_hooks("octoprint.comm.protocol.action")
+		self._input_hooks = self._pluginManager.get_hooks("octoprint.comm.protocol.input")
+		self._output_hooks = self._pluginManager.get_hooks("octoprint.comm.protocol.output")
 
 		# SD status data
 		self._sdAvailable = False
@@ -271,6 +273,9 @@ class MachineCom(object):
 	
 	def getErrorString(self):
 		return self._errorValue
+	
+	def isInitializing(self):
+		return self._state == self.STATE_DETECT_BAUDRATE or self._state == self.STATE_OPEN_SERIAL or self._state == self.STATE_DETECT_SERIAL or self._state == self.STATE_CONNECTING
 	
 	def isClosedOrError(self):
 		return self._state == self.STATE_ERROR or self._state == self.STATE_CLOSED_WITH_ERROR or self._state == self.STATE_CLOSED
@@ -852,6 +857,13 @@ class MachineCom(object):
 				if "ok" in line and heatingUp:
 					heatingUp = False
 
+				for hook in self._input_hooks:
+					hook_line = self._input_hooks[hook](self, line)
+					if hook_line is None:
+						continue
+					else:
+						line = hook_line
+						
 				### Baudrate detection
 				if self._state == self.STATE_DETECT_BAUDRATE:
 					if line == '' or time.time() > self._timeout:
@@ -1119,7 +1131,7 @@ class MachineCom(object):
 			cmd = self._lastLines[-self._resendDelta]
 			lineNumber = self._currentLine - self._resendDelta
 
-			self._doSendWithChecksum(cmd, lineNumber)
+			self._doSend(cmd, True, lineNumber)
 
 			self._resendDelta -= 1
 			if self._resendDelta <= 0:
@@ -1132,11 +1144,13 @@ class MachineCom(object):
 				return
 
 			if not self.isStreaming():
+				gcode = None
 				for hook in self._gcode_hooks:
 					hook_cmd = self._gcode_hooks[hook](self, cmd)
-					if hook_cmd and isinstance(hook_cmd, basestring):
+					if hook_cmd is None or (hook_cmd and isinstance(hook_cmd,basestring)):
 						cmd = hook_cmd
-				gcode = self._regex_command.search(cmd)
+				if cmd is not None:
+					gcode = self._regex_command.search(cmd)
 				if gcode:
 					gcode = gcode.group(1)
 
@@ -1150,24 +1164,33 @@ class MachineCom(object):
 			if cmd is not None:
 				self._doSend(cmd, sendChecksum)
 
-	def _doSend(self, cmd, sendChecksum=False):
-		if sendChecksum or self._alwaysSendChecksum:
-			lineNumber = self._currentLine
+	def _doSend(self, cmd, sendChecksum=False, lineNum=None):
+
+		if not sendChecksum:
+			sendChecksum = self._alwaysSendChecksum
+
+		for hook in self._output_hooks:
+			cmd, sendChecksum  = self._output_hooks[hook](self, cmd, sendChecksum)
+			if cmd is None:
+				return
+
+		if sendChecksum:
+			lineNumber = self._currentLine if lineNum is None else lineNum
 			self._addToLastLines(cmd)
 			self._currentLine += 1
-			self._doSendWithChecksum(cmd, lineNumber)
+			self.__doSendWithChecksum(cmd, lineNumber)
 		else:
-			self._doSendWithoutChecksum(cmd)
+			self.__doSendWithoutChecksum(cmd)
 
-	def _doSendWithChecksum(self, cmd, lineNumber):
+	def __doSendWithChecksum(self, cmd, lineNumber):
 		self._logger.debug("Sending cmd '%s' with lineNumber %r" % (cmd, lineNumber))
 
 		commandToSend = "N%d %s" % (lineNumber, cmd)
 		checksum = reduce(lambda x,y:x^y, map(ord, commandToSend))
 		commandToSend = "%s*%d" % (commandToSend, checksum)
-		self._doSendWithoutChecksum(commandToSend)
+		self.__doSendWithoutChecksum(commandToSend)
 
-	def _doSendWithoutChecksum(self, cmd):
+	def __doSendWithoutChecksum(self, cmd):
 		self._log("Send: %s" % cmd)
 		try:
 			self._serial.write(cmd + '\n')
@@ -1261,7 +1284,7 @@ class MachineCom(object):
 			newLineNumber = 0
 
 		# send M110 command with new line number
-		self._doSendWithChecksum(cmd, newLineNumber)
+		self._doSend(cmd, True, newLineNumber)
 		self._currentLine = newLineNumber + 1
 
 		# after a reset of the line number we have no way to determine what line exactly the printer now wants
